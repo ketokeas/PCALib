@@ -1,0 +1,16 @@
+name: jax-nb
+channels: [conda-forge]
+dependencies:
+  - python=3.11
+  - jupyterlab
+  - ipykernel
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib
+  - pillow
+  - tqdm
+  - shapely
+  - pip
+  - pip:
+      - -e .
