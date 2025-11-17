@@ -1,4 +1,56 @@
-# General description
+# Summary
+
+PCALib is a Python library for neural population analysis. It enables you to assess and predict how accurately PCA will recover latent low-dimensional dynamics from neural recordings, given your number of neurons, number of trials, noise levels, and other experimental parameters. It also allows you to extrapolate to larger dataset sizes and to model how PCA accuracy scales.
+
+# Installation
+
+## Using Conda (recommended)
+
+To install the package along with all required dependencies (including a CPU version of JAX), run:
+
+`./setup.sh`
+
+This script will:
+- create a conda environment named `jax-nb`,
+- install PCALib and all necessary dependencies,
+- install a CPU-only version of JAX (you may replace it with a different JAX version afterward).
+
+## Running Jupyter notebooks
+To launch Jupyter Lab inside the `jax-nb` environment, run:
+
+`./run.sh`
+
+# Features
+
+- **Latent dimensionality estimation**  
+  Automatically determines the number of meaningful latent components using surrogate-data eigenvalue thresholding.
+
+- **Inference of noise and variability statistics**  
+  Fits a statistical model describing fast neural noise, trial-to-trial variability, and latent signal strength.
+
+- **PCA accuracy prediction**  
+  Computes quantitative measures such as:  
+  - **ρ (alignment error)** measures, for each neuron and each pair of latent dimensions, how different the PCA loading vectors are from the true latent loadings. If PCA perfectly recovered the latent structure, ρ would be zero; larger values mean greater deviation.
+  - **ε (trajectory error)** measures how far the PCA-reconstructed latent trajectories are from the underlying true trajectories.
+
+- **Dataset-size extrapolation**  
+  Predicts how PCA accuracy will scale when you change:  
+  - number of neurons  
+  - number of trials (averaged or concatenated)  
+  - number of animals  
+  - noise levels or trial structure
+
+- **Animal-aware modeling**  
+  Supports multi-animal datasets via grouping matrices and animal-specific noise/variability parameters.
+
+- **Flexible data modes**  
+  Works with trial-averaged or trial-concatenated data, including optional temporal smoothing.
+
+- **Lightweight API**  
+  High-level functions (`determine_dimensionality`, `fit_statistics_from_dataset`, `extrapolate_potential`, `make_predictions`) cover the full workflow end-to-end.
+
+
+# General code description
 
 All of the code necessary for the inference and extrapolation is stored in the `pcalib` folder.
 
@@ -19,7 +71,7 @@ Here we assume that the spiking activity has been preformatted into three-dimens
 - `T` is a number of time bins within one trial;
 - `N` is a number of neurons.
 
-To use the library, you should execute the the fuctions provided in the `functions.py`.
+To use the library, you should execute the functions provided in the `functions.py`.
 
 
 # Model inference
@@ -42,7 +94,7 @@ The inference of the model parameters from the data is done by the function `fit
 Inputs:
  - `dataset` : real data of the size `[n_trials,T,N]` that has been smoothed with the convolutional kernel (if used);
  - `K` : assumed dimensionality of the latent dynamics;
- - `G` : a three-dimensional binary array of the size `[D,K,K]`, where `D` is a number of recorded animals. `G[d,i,i]=1` if neuron `i` belongs to animal `d`, zero otherwise.
+ - `G` : a three-dimensional binary array of the size `[D,N,N]`, where `D` is a number of recorded animals. `G[d,i,i]=1` if neuron `i` belongs to animal `d`, zero otherwise.
  - `gaussian_kernel_width` : width of the convolutional kernel used for data smoothing;
  - `mode` : indication whether the dataset is intended to be trial-averaged or trial-concatenated.  Accepts string values `"trial-averaged"` or `"trial-concatenated"`;
 
@@ -61,11 +113,11 @@ For this, we use `extrapolate_potential` function from the `pcalib/functions.py`
 Inputs:
  - `original` : an instance of `Potential` with the data parameters fitted from the data;
  - `new_neurons` : new number of neurons `N`. Provide only if the number of neurons is expected to change.
- - `new_trials`: : new number of trials `n_trials`. Provide only if the number of trials is expected to change.
+ - `new_trials` : new number of trials `n_trials`. Provide only if the number of trials is expected to change.
  - `existing_number_of_trials`: current number of trials `n_trials`. Provide only if the number of trials is expected to change.
  - `mode` : indication whether the dataset is intended to be trial-averaged or trial-concatenated. Accepts string values `"trial-averaged"` or `"trial-concatenated"`;
- - `new_bar_e` : Optional custom mode loadings `bar_e` for new neurons. Can be set if we assume something about the structure of the neural loadings, e.g. sparcity of the neural activity;
- - `new bar_sigma` : Optional custom noise strength for new neurons. Can be set if we assume something about the noise strength of the newly recorded neurons.
+ - `new_bar_e` : Optional custom mode loadings `bar_e` for new neurons. Can be set if we assume something about the structure of the neural loadings, e.g. sparsity of the neural activity;
+ - `new_bar_sigma` : Optional custom noise strength for new neurons. Can be set if we assume something about the noise strength of the newly recorded neurons.
  - `new_G` : if we assume that more animals will be recorded, we have to provide information about which neuron belongs to which animal.
 
 Outputs:
