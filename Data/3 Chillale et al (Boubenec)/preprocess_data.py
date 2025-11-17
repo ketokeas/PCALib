@@ -11,18 +11,36 @@ from typing import Dict, List, Tuple, Optional, Set
 root_dir = Path(os.getcwd())
 sessions_folder = root_dir  # folder containing Pelardon/Timanoix subfolders
 
-bin_width = 0.060           # 60 ms bins
-min_trials_per_type = 10    # required trials per (condition, stimulus) for a neuron to be kept
+bin_width = 0.060  # 60 ms bins
+min_trials_per_type = (
+    10  # required trials per (condition, stimulus) for a neuron to be kept
+)
 animals = ["Pelardon", "Timanoix"]
 
 # Exact stimulus-note sets per animal (as in your original script)
 go_stims_by_animal = {
-    "Pelardon": {"Stim , [16] , Target , 0dB", "Stim , [20] , Target , 0dB", "Stim , [24] , Target , 0dB"},
-    "Timanoix": {"Stim , [4] , Target , 0dB", "Stim , [8] , Target , 0dB", "Stim , [12] , Target , 0dB"}
+    "Pelardon": {
+        "Stim , [16] , Target , 0dB",
+        "Stim , [20] , Target , 0dB",
+        "Stim , [24] , Target , 0dB",
+    },
+    "Timanoix": {
+        "Stim , [4] , Target , 0dB",
+        "Stim , [8] , Target , 0dB",
+        "Stim , [12] , Target , 0dB",
+    },
 }
 nogo_stims_by_animal = {
-    "Pelardon": {"Stim , [4] , Reference", "Stim , [8] , Reference", "Stim , [12] , Reference"},
-    "Timanoix": {"Stim , [16] , Reference", "Stim , [20] , Reference", "Stim , [24] , Reference"}
+    "Pelardon": {
+        "Stim , [4] , Reference",
+        "Stim , [8] , Reference",
+        "Stim , [12] , Reference",
+    },
+    "Timanoix": {
+        "Stim , [16] , Reference",
+        "Stim , [20] , Reference",
+        "Stim , [24] , Reference",
+    },
 }
 
 # Reproducibility
@@ -36,16 +54,19 @@ np.random.seed(1234)
 def load_spike_file(file_path: Path):
     return loadmat(file_path, squeeze_me=True, struct_as_record=False)
 
+
 def decode_note(note):
     return note.decode("utf-8") if isinstance(note, (bytes, bytearray)) else note
 
+
 def parse_level_from_note(note: str) -> Optional[int]:
     try:
-        i = note.index('[') + 1
-        j = note.index(']', i)
+        i = note.index("[") + 1
+        j = note.index("]", i)
         return int(note[i:j].strip())
     except Exception:
         return None
+
 
 def map_level_to_note(stim_set: Set[str]) -> Dict[int, str]:
     out = {}
@@ -54,6 +75,7 @@ def map_level_to_note(stim_set: Set[str]) -> Dict[int, str]:
         if lvl is not None:
             out[lvl] = s
     return out
+
 
 def build_condition_order_for_animal(animal: str) -> List[Tuple[str, str]]:
     """Return desired (cond, stim_note) order for time-concat per animal."""
@@ -74,10 +96,15 @@ def build_condition_order_for_animal(animal: str) -> List[Tuple[str, str]]:
         elif lvl in go_map:
             order.append(("go", go_map[lvl]))
         else:
-            raise ValueError(f"Level {lvl} not found in provided stimulus sets for {animal}.")
+            raise ValueError(
+                f"Level {lvl} not found in provided stimulus sets for {animal}."
+            )
     return order
 
-def classify_trials(exptevents, go_stims: Set[str], nogo_stims: Set[str]) -> Dict[Tuple[str, str], List[int]]:
+
+def classify_trials(
+    exptevents, go_stims: Set[str], nogo_stims: Set[str]
+) -> Dict[Tuple[str, str], List[int]]:
     events_by_trial: Dict[int, List[str]] = {}
     for evt in exptevents:
         trial = int(evt.Trial)
@@ -96,6 +123,7 @@ def classify_trials(exptevents, go_stims: Set[str], nogo_stims: Set[str]) -> Dic
                 groups[("nogo", stim)].append(trial)
     return groups
 
+
 def extract_trial_times(exptevents):
     start_times, stop_times, stim_onsets = {}, {}, {}
     for evt in exptevents:
@@ -110,7 +138,10 @@ def extract_trial_times(exptevents):
                 stim_onsets[trial] = evt.StartTime
     return start_times, stop_times, stim_onsets
 
-def eligible_prepost_for_groups(start_times, stop_times, stim_onsets, groups_trials) -> Tuple[List[float], List[float]]:
+
+def eligible_prepost_for_groups(
+    start_times, stop_times, stim_onsets, groups_trials
+) -> Tuple[List[float], List[float]]:
     pre_times, post_times = [], []
     all_trials = set()
     for tids in groups_trials.values():
@@ -124,7 +155,10 @@ def eligible_prepost_for_groups(start_times, stop_times, stim_onsets, groups_tri
                 post_times.append(post)
     return pre_times, post_times
 
-def bin_and_align_single_neuron(unitSpikes, trial_ids, stim_onsets, pre_bins, post_bins, bin_width, rate):
+
+def bin_and_align_single_neuron(
+    unitSpikes, trial_ids, stim_onsets, pre_bins, post_bins, bin_width, rate
+):
     T = pre_bins + post_bins
     binned = np.zeros((len(trial_ids), T), dtype=np.int32)
 
@@ -138,7 +172,9 @@ def bin_and_align_single_neuron(unitSpikes, trial_ids, stim_onsets, pre_bins, po
         mask = trial_num == trial_id
         if not np.any(mask):
             continue
-        local_times = spike_times[mask] - stim_onsets[trial_id]  # align: time 0 = stimulus onset
+        local_times = (
+            spike_times[mask] - stim_onsets[trial_id]
+        )  # align: time 0 = stimulus onset
         bins = np.floor(local_times / bin_width).astype(int) + pre_bins
         valid = (bins >= 0) & (bins < T)
         if np.any(valid):
@@ -167,22 +203,32 @@ def scan_for_global_bins(animals: List[str]) -> Tuple[int, int]:
             if not files:
                 continue
             mat = load_spike_file(files[0])
-            start_times, stop_times, stim_onsets = extract_trial_times(mat["exptevents"])
+            start_times, stop_times, stim_onsets = extract_trial_times(
+                mat["exptevents"]
+            )
             groups_trials = classify_trials(mat["exptevents"], go_stims, nogo_stims)
-            pre_times, post_times = eligible_prepost_for_groups(start_times, stop_times, stim_onsets, groups_trials)
+            pre_times, post_times = eligible_prepost_for_groups(
+                start_times, stop_times, stim_onsets, groups_trials
+            )
             global_pre_times.extend(pre_times)
             global_post_times.extend(post_times)
 
     if not global_pre_times or not global_post_times:
-        raise RuntimeError("No valid trials with start/stop/stim across sessions; cannot compute global bins.")
+        raise RuntimeError(
+            "No valid trials with start/stop/stim across sessions; cannot compute global bins."
+        )
 
     global_pre_bins = int(np.floor(min(global_pre_times) / bin_width))
     global_post_bins = int(np.floor(min(global_post_times) / bin_width))
 
     if global_pre_bins <= 0 or global_post_bins <= 0:
-        raise RuntimeError(f"Computed non-positive global bins: pre={global_pre_bins}, post={global_post_bins}")
+        raise RuntimeError(
+            f"Computed non-positive global bins: pre={global_pre_bins}, post={global_post_bins}"
+        )
 
-    print(f"[GLOBAL] pre_bins={global_pre_bins}, post_bins={global_post_bins}, T={global_pre_bins + global_post_bins}")
+    print(
+        f"[GLOBAL] pre_bins={global_pre_bins}, post_bins={global_post_bins}, T={global_pre_bins + global_post_bins}"
+    )
     return global_pre_bins, global_post_bins
 
 
@@ -194,7 +240,7 @@ def process_session_with_global_bins(
     stim_orders: List[Tuple[str, str]],
     min_trials_per_type: int,
     pre_bins: int,
-    post_bins: int
+    post_bins: int,
 ):
     mat = load_spike_file(file_path)
     rate = mat["rate"]
@@ -222,8 +268,13 @@ def process_session_with_global_bins(
                     break
                 selected = random.sample(trial_ids, min_trials_per_type)
                 binned = bin_and_align_single_neuron(
-                    unit.unitSpikes, selected, stim_onsets,
-                    pre_bins, post_bins, bin_width, rate
+                    unit.unitSpikes,
+                    selected,
+                    stim_onsets,
+                    pre_bins,
+                    post_bins,
+                    bin_width,
+                    rate,
                 )
                 if binned is None or binned.shape[0] != min_trials_per_type:
                     ok = False
@@ -236,7 +287,9 @@ def process_session_with_global_bins(
         return None
 
     # Stack neurons for each condition → (trials, T, neurons_in_session)
-    cond_arrays = {cond: np.stack([nd[cond] for nd in neuron_data], axis=2) for cond in stim_orders}
+    cond_arrays = {
+        cond: np.stack([nd[cond] for nd in neuron_data], axis=2) for cond in stim_orders
+    }
     return cond_arrays
 
 
@@ -254,7 +307,9 @@ if __name__ == "__main__":
     # 2) Process & save per-animal arrays in requested order
     for animal in animals:
         print(f"\nProcessing {animal}")
-        stim_orders = build_condition_order_for_animal(animal)  # explicit time order for this animal
+        stim_orders = build_condition_order_for_animal(
+            animal
+        )  # explicit time order for this animal
 
         animal_path = sessions_folder / animal / "Spike_sorting"
         if not animal_path.exists():
@@ -273,8 +328,11 @@ if __name__ == "__main__":
             if not files:
                 continue
             processed = process_session_with_global_bins(
-                files[0], stim_orders, min_trials_per_type,
-                pre_bins=global_pre_bins, post_bins=global_post_bins
+                files[0],
+                stim_orders,
+                min_trials_per_type,
+                pre_bins=global_pre_bins,
+                post_bins=global_post_bins,
             )
             if processed is None:
                 continue
@@ -292,35 +350,49 @@ if __name__ == "__main__":
         }
 
         # Concatenate conditions along time in the requested order
-        animal_array = np.concatenate([merged_cond_arrays[cond] for cond in stim_orders], axis=1)
+        animal_array = np.concatenate(
+            [merged_cond_arrays[cond] for cond in stim_orders], axis=1
+        )
         # Save per-animal
         np.save(f"preprocessed_data_{animal}.npy", animal_array)
 
         per_animal_arrays[animal] = animal_array
         per_animal_neuron_counts[animal] = animal_array.shape[2]
 
-        print(f"  Saved preprocessed_data_{animal}.npy with shape {animal_array.shape} "
-              f"# (trials={min_trials_per_type}, time=6*T, neurons)")
+        print(
+            f"  Saved preprocessed_data_{animal}.npy with shape {animal_array.shape} "
+            f"# (trials={min_trials_per_type}, time=6*T, neurons)"
+        )
 
     # 3) Combined 2-block array (first + last condition block for each animal), and G mask
     if "Pelardon" in per_animal_arrays and "Timanoix" in per_animal_arrays:
-        pel = per_animal_arrays["Pelardon"]   # (trials, 6*T, Np)
-        tim = per_animal_arrays["Timanoix"]   # (trials, 6*T, Nt)
+        pel = per_animal_arrays["Pelardon"]  # (trials, 6*T, Np)
+        tim = per_animal_arrays["Timanoix"]  # (trials, 6*T, Nt)
 
         trials = pel.shape[0]
-        assert tim.shape[0] == trials, "Mismatch in trials per condition across animals."
+        assert (
+            tim.shape[0] == trials
+        ), "Mismatch in trials per condition across animals."
 
         # First and last blocks for each animal (block 0 and block 5 in their own orders)
         b0 = slice(0, T_global)
         b5 = slice(5 * T_global, 6 * T_global)
 
-        pel_2 = np.concatenate([pel[:, b0, :], pel[:, b5, :]], axis=1)  # (trials, 2*T, Np)
-        tim_2 = np.concatenate([tim[:, b0, :], tim[:, b5, :]], axis=1)  # (trials, 2*T, Nt)
+        pel_2 = np.concatenate(
+            [pel[:, b0, :], pel[:, b5, :]], axis=1
+        )  # (trials, 2*T, Np)
+        tim_2 = np.concatenate(
+            [tim[:, b0, :], tim[:, b5, :]], axis=1
+        )  # (trials, 2*T, Nt)
 
-        combined_2blocks = np.concatenate([pel_2, tim_2], axis=2)        # (trials, 2*T, Np+Nt)
+        combined_2blocks = np.concatenate(
+            [pel_2, tim_2], axis=2
+        )  # (trials, 2*T, Np+Nt)
         np.save("preformatted_data.npy", combined_2blocks)
-        print(f"\nSaved combined_2blocks.npy with shape {combined_2blocks.shape} "
-              f"# (trials, 2*time, neurons_pelardon+neurons_timanoix)")
+        print(
+            f"\nSaved combined_2blocks.npy with shape {combined_2blocks.shape} "
+            f"# (trials, 2*time, neurons_pelardon+neurons_timanoix)"
+        )
 
         # Build G: [2, N, N] with diagonal membership indicators
         Np = per_animal_neuron_counts["Pelardon"]
@@ -328,8 +400,8 @@ if __name__ == "__main__":
         N = Np + Nt
 
         G = np.zeros((2, N, N), dtype=np.int8)
-        G[0, np.arange(Np), np.arange(Np)] = 1               # Pelardon on diag
-        G[1, Np + np.arange(Nt), Np + np.arange(Nt)] = 1     # Timanoix on diag
+        G[0, np.arange(Np), np.arange(Np)] = 1  # Pelardon on diag
+        G[1, Np + np.arange(Nt), Np + np.arange(Nt)] = 1  # Timanoix on diag
 
         np.save("G.npy", G)
         print(f"Saved G.npy with shape {G.shape}  # [2, N, N]")

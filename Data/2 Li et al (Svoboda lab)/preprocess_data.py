@@ -8,6 +8,7 @@ from scipy.io import loadmat
 # Helpers to read MATLAB structs
 # -----------------------------------------------------------------------------
 
+
 def _load_mat(path: str):
     """
     Load a MATLAB .mat file robustly across SciPy versions.
@@ -39,7 +40,7 @@ def _get_trial_windows(tsa: Dict) -> Dict[int, Tuple[float, float]]:
     trial_ids = np.unique(trial_vec)
     windows: Dict[int, Tuple[float, float]] = {}
     for tid in trial_ids:
-        idx = (trial_vec == tid)
+        idx = trial_vec == tid
         if np.any(idx):
             t0 = float(time_vec[idx].min())
             t1 = float(time_vec[idx].max())
@@ -82,7 +83,10 @@ def _is_pyramidal(cell_type) -> bool:
 # Binning
 # -----------------------------------------------------------------------------
 
-def _bin_trial_event_times(event_times_rel: np.ndarray, bin_size: float, T_bins: int) -> np.ndarray:
+
+def _bin_trial_event_times(
+    event_times_rel: np.ndarray, bin_size: float, T_bins: int
+) -> np.ndarray:
     """
     Bin spike times relative to trial start into fixed-width bins.
 
@@ -116,6 +120,7 @@ def _bin_trial_event_times(event_times_rel: np.ndarray, bin_size: float, T_bins:
 # Per-animal builder (as provided, slightly tidied, returns arrays + meta)
 # -----------------------------------------------------------------------------
 
+
 def build_pseudopop_for_animal_from_raw(
     data_root: str,
     animal_id: str,
@@ -147,7 +152,7 @@ def build_pseudopop_for_animal_from_raw(
         rng = np.random.default_rng()
 
     # Find all sessions for this animal (letter after date optional)
-    #pat = re.compile(rf"^data_structure_{re.escape(animal_id)}_(\d{{8}}[a-z]?)\.mat$")
+    # pat = re.compile(rf"^data_structure_{re.escape(animal_id)}_(\d{{8}}[a-z]?)\.mat$")
     pat = re.compile(rf"^{re.escape(animal_id)}_(\d{{8}}[a-z]?)\.mat$")
     session_paths: List[str] = []
     for dirpath, _, files in os.walk(data_root):
@@ -186,7 +191,9 @@ def build_pseudopop_for_animal_from_raw(
         except Exception as e:
             raise IndexError(f"trialTypeMat indexing failed in {spath}: {e}")
 
-        keep_left_cols = np.where(left_mask & ~stim_mask & ~early_mask)[0] + 1  # MATLAB->Python IDs
+        keep_left_cols = (
+            np.where(left_mask & ~stim_mask & ~early_mask)[0] + 1
+        )  # MATLAB->Python IDs
         keep_right_cols = np.where(right_mask & ~stim_mask & ~early_mask)[0] + 1
 
         durations: List[float] = []
@@ -196,20 +203,28 @@ def build_pseudopop_for_animal_from_raw(
                 durations.append(win[1] - win[0])
         if durations:
             sess_min = float(np.min(durations))
-            min_duration = sess_min if min_duration is None else min(min_duration, sess_min)
+            min_duration = (
+                sess_min if min_duration is None else min(min_duration, sess_min)
+            )
 
-        session_info.append({
-            "path": spath,
-            "trial_windows": trial_windows,  # dict tid -> (t0, t1)
-            "keep_left_tids": keep_left_cols.astype(int),
-            "keep_right_tids": keep_right_cols.astype(int),
-        })
+        session_info.append(
+            {
+                "path": spath,
+                "trial_windows": trial_windows,  # dict tid -> (t0, t1)
+                "keep_left_tids": keep_left_cols.astype(int),
+                "keep_right_tids": keep_right_cols.astype(int),
+            }
+        )
 
     if min_duration is None or min_duration <= 0:
-        raise RuntimeError("Could not determine a positive minimal trial duration across sessions.")
+        raise RuntimeError(
+            "Could not determine a positive minimal trial duration across sessions."
+        )
     T_bins = int(np.floor(min_duration / bin_size))
     if T_bins <= 0:
-        raise RuntimeError(f"Computed T_bins={T_bins} from min_duration={min_duration:.6f}s and bin_size={bin_size}s")
+        raise RuntimeError(
+            f"Computed T_bins={T_bins} from min_duration={min_duration:.6f}s and bin_size={bin_size}s"
+        )
 
     # ---------------- PASS 2: bin per neuron & select trials ---------------- #
     left_blocks: List[np.ndarray] = []
@@ -248,7 +263,7 @@ def build_pseudopop_for_animal_from_raw(
                 if win is None:
                     continue
                 t0 = win[0]
-                idx = (ev_trials == int(tid))
+                idx = ev_trials == int(tid)
                 rel_times = ev_times[idx] - t0
                 counts = _bin_trial_event_times(rel_times, bin_size, T_bins)
                 L_rows.append(counts)
@@ -259,7 +274,7 @@ def build_pseudopop_for_animal_from_raw(
                 if win is None:
                     continue
                 t0 = win[0]
-                idx = (ev_trials == int(tid))
+                idx = ev_trials == int(tid)
                 rel_times = ev_times[idx] - t0
                 counts = _bin_trial_event_times(rel_times, bin_size, T_bins)
                 R_rows.append(counts)
@@ -290,9 +305,11 @@ def build_pseudopop_for_animal_from_raw(
             f"No pyramidal neurons met the ≥{n_trials} trials per side criterion for {animal_id}."
         )
 
-    left_arr = np.concatenate(left_blocks, axis=2)   # [n_trials, T_bins, N_d]
-    right_arr = np.concatenate(right_blocks, axis=2) # [n_trials, T_bins, N_d]
-    both_arr = np.concatenate([left_arr, right_arr], axis=1)  # [n_trials, 2*T_bins, N_d]
+    left_arr = np.concatenate(left_blocks, axis=2)  # [n_trials, T_bins, N_d]
+    right_arr = np.concatenate(right_blocks, axis=2)  # [n_trials, T_bins, N_d]
+    both_arr = np.concatenate(
+        [left_arr, right_arr], axis=1
+    )  # [n_trials, 2*T_bins, N_d]
 
     meta = {
         "animal_id": animal_id,
@@ -317,6 +334,7 @@ def build_pseudopop_for_animal_from_raw(
 # Cross-animal builder (efficient): build per animal, then truncate at the end
 # -----------------------------------------------------------------------------
 
+
 def _list_animal_ids_by_subfolders(data_root: str) -> List[str]:
     """
     Treat each subdirectory of `data_root` as an animal ID.
@@ -325,7 +343,7 @@ def _list_animal_ids_by_subfolders(data_root: str) -> List[str]:
     ids: List[str] = []
     for name in os.listdir(data_root):
         path = os.path.join(data_root, name)
-        if os.path.isdir(path) and not name.startswith('.'):
+        if os.path.isdir(path) and not name.startswith("."):
             ids.append(name)
     return sorted(ids)
 
@@ -379,7 +397,9 @@ def build_cross_animal_pseudopop(
     if animal_ids is None:
         animal_ids = _list_animal_ids_by_subfolders(data_root)
         if verbose:
-            print(f"Discovered {len(animal_ids)} animal(s): {', '.join(animal_ids) if animal_ids else 'NONE'}")
+            print(
+                f"Discovered {len(animal_ids)} animal(s): {', '.join(animal_ids) if animal_ids else 'NONE'}"
+            )
 
     left_blocks_all: List[np.ndarray] = []
     right_blocks_all: List[np.ndarray] = []
@@ -405,7 +425,10 @@ def build_cross_animal_pseudopop(
                 print(f"Skipping {aid}: {e}")
             continue
 
-        if expect_same_bin_size and abs(meta.get("bin_size_s", bin_size) - bin_size) > 1e-12:
+        if (
+            expect_same_bin_size
+            and abs(meta.get("bin_size_s", bin_size) - bin_size) > 1e-12
+        ):
             raise ValueError(
                 f"Bin size mismatch for {aid}: meta has {meta.get('bin_size_s')} vs requested {bin_size}"
             )
@@ -430,7 +453,10 @@ def build_cross_animal_pseudopop(
     # Truncate all arrays to min_T_bins and rebuild both-arrays accordingly
     left_blocks_all = [arr[:, :min_T_bins, :] for arr in left_blocks_all]
     right_blocks_all = [arr[:, :min_T_bins, :] for arr in right_blocks_all]
-    both_blocks_all = [np.concatenate([L, R], axis=1) for L, R in zip(left_blocks_all, right_blocks_all)]
+    both_blocks_all = [
+        np.concatenate([L, R], axis=1)
+        for L, R in zip(left_blocks_all, right_blocks_all)
+    ]
 
     # Concatenate along neuron axis
     left_all = np.concatenate(left_blocks_all, axis=2)
@@ -469,12 +495,24 @@ if __name__ == "__main__":
         type=str,
         nargs="?",
         default=os.getcwd(),
-        help="Root directory with per-animal subfolders (default: current directory)"
+        help="Root directory with per-animal subfolders (default: current directory)",
     )
-    parser.add_argument("--n_trials", type=int, default=20, help="Trials per side per neuron")
-    parser.add_argument("--bin_size", type=float, default=0.010, help="Bin size in seconds")
-    parser.add_argument("--animals", type=str, nargs='*', default=None, help="Explicit list of animal IDs (subfolder names)")
-    parser.add_argument("--no_verbose", action="store_true", help="Silence progress prints")
+    parser.add_argument(
+        "--n_trials", type=int, default=20, help="Trials per side per neuron"
+    )
+    parser.add_argument(
+        "--bin_size", type=float, default=0.010, help="Bin size in seconds"
+    )
+    parser.add_argument(
+        "--animals",
+        type=str,
+        nargs="*",
+        default=None,
+        help="Explicit list of animal IDs (subfolder names)",
+    )
+    parser.add_argument(
+        "--no_verbose", action="store_true", help="Silence progress prints"
+    )
     args = parser.parse_args()
 
     rng = np.random.default_rng(12345)
@@ -487,11 +525,10 @@ if __name__ == "__main__":
         rng=rng,
         verbose=not args.no_verbose,
     )
-    
+
     np.save(os.path.join(args.data_root, "preformatted_data.npy"), both_all)
-    
-    
-     # --- Build G matrix ---
+
+    # --- Build G matrix ---
     num_animals = len(meta_all["animals"])
     total_neurons = meta_all["N_total_neurons"]
     G = np.zeros((num_animals, total_neurons, total_neurons), dtype=np.float32)
@@ -505,7 +542,6 @@ if __name__ == "__main__":
 
     # Save G
     np.save(os.path.join(args.data_root, "G.npy"), G)
-    
 
     print("\nSummary:")
     print(f"  Animals: {meta_all['animals']}")
@@ -514,4 +550,3 @@ if __name__ == "__main__":
     print(f"  left_all shape : {left_all.shape}")
     print(f"  right_all shape: {right_all.shape}")
     print(f"  both_all shape : {both_all.shape}")
-
