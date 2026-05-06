@@ -1,14 +1,11 @@
 import copy
-
 import matplotlib.pyplot as plt
-
 from . import utils, classes
 import numpy as np
 import jax
 import jax.numpy as jnp
 import scipy
 import time
-
 
 def determine_dimensionality(
     non_flattened_data, mode, n_samples=1000, random_seed=0, plot=False
@@ -208,728 +205,392 @@ def make_predictions(
 
     return result
 
+def fit_statistics_from_dataset(
+    dataset,
+    K,
+    G,
+    gaussian_kernel_width,
+    mode="trial-averaged",
+    gamma=0.5,
+    eig_difference_cutoff=1e-2,
+    improvement_cutoff=1e-3,
+    scale_factor=10.0,
+):
+    jax.config.update("jax_enable_x64", True)
 
-if True:
+    init_gamma = gamma
+    n_trials, T_single_trial, N = dataset.shape
 
-    def fit_statistics_from_dataset(
-        dataset,
-        K,
-        G,
-        gaussian_kernel_width,
-        mode="trial-averaged",
-        gamma=0.5,
-        eig_difference_cutoff=1e-2,
-        improvement_cutoff=1e-3,
-        scale_factor=10.0,
-    ):
-        jax.config.update("jax_enable_x64", True)
-
-        init_gamma = gamma
-        n_trials, T_single_trial, N = dataset.shape
-
-        # ---------- Build flattened data & keep pre-centering means ----------
-        if mode == "trial-averaged":
-            flattened_dataset = np.mean(dataset, axis=0)  # shape [T, N], this is s_i(t)
-            T = T_single_trial
-        elif mode == "trial-concatenated":
-            flattened_dataset = np.reshape(
-                dataset, [n_trials * T_single_trial, N]
-            )  # s_i(t)
-            T = n_trials * T_single_trial
-        else:
-            raise ValueError(
-                'Please select the way to treat your trials: "trial-averaged" or "trial-concatenated".'
-            )
-
-        # Save pre-centering per-neuron mean  \bar{s_i}  for Poisson diagonal correction
-        pre_center_mean = np.mean(flattened_dataset, axis=0)  # vector length N
-
-        # Mean-center data (standard PCA step)
-        flattened_dataset = flattened_dataset - pre_center_mean[None, :]
-
-        # Raw total variance (per neuron) from centered data
-        total_variance_raw = (
-            np.sum(flattened_dataset**2, axis=0) / T
-        )  # Var[s_i] after centering
-
-        # ---------- Compute Poisson-aware diagonal correction Δ_i ----------
-        # Build discrete Gaussian kernel (L1-normalized) and get its L2 energy E = sum g^2
-        def _gaussian_kernel_energy(width):
-            # width is in time-bin units; use support ±4σ (safe & standard)
-            L = int(np.ceil(4.0 * max(width, 1e-8)))
-            t = np.arange(-L, L + 1)
-            g = np.exp(-0.5 * (t / width) ** 2)
-            g = g / np.sum(g)  # L1 normalization (sum g = 1)
-            E = np.sum(g**2)  # L2 energy (sum g^2)
-            return E
-
-        E_kernel = _gaussian_kernel_energy(
-            gaussian_kernel_width
-        )  # scalar if same kernel for all i
-        # If kernels differ across neurons, replace with a vector E_i.
-
-        # Δ_i = (sum_tau F_i(τ)^2) * \bar{s_i}  ; here F is L1-normalized Gaussian with width given
-        Delta = E_kernel * pre_center_mean  # vector length N
-
-        # ---------- Do PCA on the corrected covariance ----------
-        # C = (1/T) X^T X with X mean-centered. Then subtract Δ on the diagonal.
-        X = flattened_dataset  # shape [T, N]
-        C = (X.T @ X) / T  # empirical covariance across neurons
-        # Apply correction on diagonal; clip to ensure PSD numerical stability if needed
-        C[np.diag_indices(N)] = np.maximum(C[np.diag_indices(N)] - Delta, 0.0)
-
-        # Eigen-decomposition of symmetric covariance; sort descending
-        eigvals, eigvecs = np.linalg.eigh(C)
-        idx = np.argsort(eigvals)[::-1]
-        eigs = eigvals[idx]
-        coeff = eigvecs[:, idx]
-
-        # Scores (time factors) consistent with coeff from corrected C
-        score = X @ coeff
-
-        # Everything below proceeds as before, but using corrected eigs, coeff, score
-        v_i = coeff[:, :K] * np.sqrt(N)
-        y_t = score[:, :K] / np.sqrt(N)
-
-        lambdas_empirical = eigs[:K] / N
-        normalized_y_t = y_t / np.sqrt(np.var(y_t, axis=0))
-
-        Z = utils.generate_gaussian_correlation_matrix(
-            T, np.sqrt(2) * gaussian_kernel_width
+    # ---------- Build flattened data & keep pre-centering means ----------
+    if mode == "trial-averaged":
+        flattened_dataset = np.mean(dataset, axis=0)  # shape [T, N], this is s_i(t)
+        T = T_single_trial
+    elif mode == "trial-concatenated":
+        flattened_dataset = np.reshape(
+            dataset, [n_trials * T_single_trial, N]
+        )  # s_i(t)
+        T = n_trials * T_single_trial
+    else:
+        raise ValueError(
+            'Please select the way to treat your trials: "trial-averaged" or "trial-concatenated".'
         )
-        (
-            tau_kernel,
-            tau_dx,
-            xi_to_sigma_ratios,
-        ) = fit_correlation_times_and_amplitude_ratios(dataset, K, G, Z, mode=mode)
 
-        print("Inferred tau kernel:", tau_kernel)
-        print("Inferred tau_dx:", tau_dx)
-        print("Inferred xi_to_sigma_ratios:", xi_to_sigma_ratios)
+    # Save pre-centering per-neuron mean  \bar{s_i}  for Poisson diagonal correction
+    pre_center_mean = np.mean(flattened_dataset, axis=0)  # vector length N
 
-        Delta_mat = utils.generate_gaussian_correlation_matrix(T, tau_dx)
-        Xi = np.zeros((T, T))
+    # Mean-center data (standard PCA step)
+    flattened_dataset = flattened_dataset - pre_center_mean[None, :]
 
-        # IMPORTANT: use a variance baseline consistent with the corrected diagonal
-        # total_variance_corr = Var[s_i] - Δ_i   (Δ_i is an additive diagonal inflation)
-        total_variance_corr = np.maximum(total_variance_raw - Delta, 0.0)
+    # Raw total variance (per neuron) from centered data
+    total_variance_raw = (
+        np.sum(flattened_dataset**2, axis=0) / T
+    )  # Var[s_i] after centering
 
-        def recalculate_noise(sqrt_signal_variances):
-            noise_variance = jnp.clip(
-                total_variance_corr
-                - jnp.einsum("k,ik->i", sqrt_signal_variances**2, v_i**2),
+    # ---------- Compute Poisson-aware diagonal correction Δ_i ----------
+    # Build discrete Gaussian kernel (L1-normalized) and get its L2 energy E = sum g^2
+    def _gaussian_kernel_energy(width):
+        # width is in time-bin units; use support ±4σ (safe & standard)
+        L = int(np.ceil(4.0 * max(width, 1e-8)))
+        t = np.arange(-L, L + 1)
+        g = np.exp(-0.5 * (t / width) ** 2)
+        g = g / np.sum(g)  # L1 normalization (sum g = 1)
+        E = np.sum(g**2)  # L2 energy (sum g^2)
+        return E
+
+    E_kernel = _gaussian_kernel_energy(
+        gaussian_kernel_width
+    )  # scalar if same kernel for all i
+    # If kernels differ across neurons, replace with a vector E_i.
+
+    # Δ_i = (sum_tau F_i(τ)^2) * \bar{s_i}  ; here F is L1-normalized Gaussian with width given
+    Delta = E_kernel * pre_center_mean  # vector length N
+
+    # ---------- Do PCA on the corrected covariance ----------
+    # C = (1/T) X^T X with X mean-centered. Then subtract Δ on the diagonal.
+    X = flattened_dataset  # shape [T, N]
+    C = (X.T @ X) / T  # empirical covariance across neurons
+    # Apply correction on diagonal; clip to ensure PSD numerical stability if needed
+    C[np.diag_indices(N)] = np.maximum(C[np.diag_indices(N)] - Delta, 0.0)
+
+    # Eigen-decomposition of symmetric covariance; sort descending
+    eigvals, eigvecs = np.linalg.eigh(C)
+    idx = np.argsort(eigvals)[::-1]
+    eigs = eigvals[idx]
+    coeff = eigvecs[:, idx]
+
+    # Scores (time factors) consistent with coeff from corrected C
+    score = X @ coeff
+
+    # Everything below proceeds as before, but using corrected eigs, coeff, score
+    v_i = coeff[:, :K] * np.sqrt(N)
+    y_t = score[:, :K] / np.sqrt(N)
+
+    lambdas_empirical = eigs[:K] / N
+    normalized_y_t = y_t / np.sqrt(np.var(y_t, axis=0))
+
+    Z = utils.generate_gaussian_correlation_matrix(
+        T, np.sqrt(2) * gaussian_kernel_width
+    )
+    (
+        tau_kernel,
+        tau_dx,
+        xi_to_sigma_ratios,
+    ) = fit_correlation_times_and_amplitude_ratios(dataset, K, G, Z, mode=mode)
+
+    print("Inferred tau kernel:", tau_kernel)
+    print("Inferred tau_dx:", tau_dx)
+    print("Inferred xi_to_sigma_ratios:", xi_to_sigma_ratios)
+
+    Delta_mat = utils.generate_gaussian_correlation_matrix(T, tau_dx)
+    Xi = np.zeros((T, T))
+
+    # IMPORTANT: use a variance baseline consistent with the corrected diagonal
+    # total_variance_corr = Var[s_i] - Δ_i   (Δ_i is an additive diagonal inflation)
+    total_variance_corr = np.maximum(total_variance_raw - Delta, 0.0)
+
+    def recalculate_noise(sqrt_signal_variances):
+        noise_variance = jnp.clip(
+            total_variance_corr
+            - jnp.einsum("k,ik->i", sqrt_signal_variances**2, v_i**2),
+            0,
+        )
+        denum_non_sigma = (
+            jnp.einsum("dk,ik,dii->", xi_to_sigma_ratios, v_i**2, G) / N
+        )
+        mean_sigma_squared_estimation = (
+            jnp.sum(noise_variance) / N / (N + denum_non_sigma)
+        )
+        xi_k_estimation = jnp.sqrt(
+            mean_sigma_squared_estimation * xi_to_sigma_ratios
+        )
+        sigma_i_estimation = jnp.sqrt(
+            jnp.clip(
+                noise_variance
+                - jnp.einsum("dk,ik,dii->i", xi_k_estimation**2, v_i**2, G),
                 0,
             )
-            denum_non_sigma = (
-                jnp.einsum("dk,ik,dii->", xi_to_sigma_ratios, v_i**2, G) / N
-            )
-            mean_sigma_squared_estimation = (
-                jnp.sum(noise_variance) / N / (N + denum_non_sigma)
-            )
-            xi_k_estimation = jnp.sqrt(
-                mean_sigma_squared_estimation * xi_to_sigma_ratios
-            )
-            sigma_i_estimation = jnp.sqrt(
-                jnp.clip(
-                    noise_variance
-                    - jnp.einsum("dk,ik,dii->i", xi_k_estimation**2, v_i**2, G),
-                    0,
-                )
-                / N
-            )
-            return sigma_i_estimation, xi_k_estimation
-
-        sigma_i, xi_k = recalculate_noise(np.sqrt(np.var(y_t, axis=0)))
-        potential = classes.Potential(sigma_i, v_i, G, xi_k, Z, Delta_mat, y_t, Xi)
-
-        relative_top_eigenvalue_difference = np.inf
-        improvement = np.inf
-        eps = 1e-4
-
-        predictions_old = make_predictions(
-            potential, scale_factor=scale_factor, compute_derivative=True, return_R=True
+            / N
         )
+        return sigma_i_estimation, xi_k_estimation
 
-        while (
-            relative_top_eigenvalue_difference > eig_difference_cutoff
-            and improvement > improvement_cutoff
-            and gamma > 1e-4
-        ):
-            gradient = predictions_old["d_lambda_d_sqrt_var"] @ (
-                predictions_old["top_eigenvalues"] - lambdas_empirical
-            )
-            new_sqrt_variance = np.abs(
-                np.sqrt(np.var(potential.bar_x, axis=0)) - gamma * gradient
-            )
-            potential.bar_x = normalized_y_t * new_sqrt_variance
-            potential.bar_sigma, potential.bar_xi = recalculate_noise(new_sqrt_variance)
-            potential.update_X()
+    sigma_i, xi_k = recalculate_noise(np.sqrt(np.var(y_t, axis=0)))
+    potential = classes.Potential(sigma_i, v_i, G, xi_k, Z, Delta_mat, y_t, Xi)
 
-            predictions = make_predictions(
-                potential, scale_factor=scale_factor, return_R=True
-            )
+    relative_top_eigenvalue_difference = np.inf
+    improvement = np.inf
+    eps = 1e-4
 
-            R_diag_elements_old = jnp.einsum("dii->di", predictions_old["R"]) + np.sqrt(
-                eps
-            )
-            R_diag_elements = jnp.einsum("dii->di", predictions["R"]) + np.sqrt(eps)
+    predictions_old = make_predictions(
+        potential, scale_factor=scale_factor, compute_derivative=True, return_R=True
+    )
 
-            if jnp.min(R_diag_elements / R_diag_elements_old) < 0.5:
-                gamma /= 2
-            else:
-                predictions_old = predictions
-                gamma = init_gamma
-
-            top_eigenvalue_difference = jnp.sum(
-                jnp.abs(predictions["top_eigenvalues"] - lambdas_empirical)
-            )
-            old_relative = relative_top_eigenvalue_difference
-            relative_top_eigenvalue_difference = top_eigenvalue_difference / jnp.sum(
-                jnp.abs(lambdas_empirical)
-            )
-            improvement = (
-                np.abs(old_relative - relative_top_eigenvalue_difference)
-                / relative_top_eigenvalue_difference
-            )
-
-            print("Relative eigenvalue difference:", relative_top_eigenvalue_difference)
-            print("Improvement:", improvement)
-            print("Rho:", predictions["rho"])
-
-        return potential
-
-    def fit_statistics_from_dataset_diagonal(
-        dataset,
-        K,
-        G,
-        gaussian_kernel_width,
-        mode="trial-averaged",
-        gamma=0.7,
-        eig_difference_cutoff=1e-2,
-        improvement_cutoff=1e-3,
+    while (
+        relative_top_eigenvalue_difference > eig_difference_cutoff
+        and improvement > improvement_cutoff
+        and gamma > 1e-4
     ):
-        import copy
-        import numpy as np
-        import jax
-        import jax.numpy as jnp
-        from . import utils, classes
-        from .functions import make_predictions
-
-        jax.config.update("jax_enable_x64", True)
-
-        D = np.shape(G)[0]
-        init_gamma = gamma
-        n_trials, T_single_trial, N = dataset.shape
-
-        # ---------- Build flattened data & keep pre-centering means ----------
-        if mode == "trial-averaged":
-            flattened_dataset = np.mean(dataset, axis=0)  # s_i(t)
-            T = T_single_trial
-        elif mode == "trial-concatenated":
-            flattened_dataset = np.reshape(
-                dataset, [n_trials * T_single_trial, N]
-            )  # s_i(t)
-            T = n_trials * T_single_trial
-        else:
-            raise ValueError(
-                'Please select either "trial-averaged" or "trial-concatenated".'
-            )
-
-        pre_center_mean = np.mean(flattened_dataset, axis=0)  # \bar{s_i}
-        flattened_dataset = flattened_dataset - pre_center_mean[None, :]
-
-        total_variance_raw = np.sum(flattened_dataset**2, axis=0) / T
-
-        # ---------- Poisson-aware diagonal correction ----------
-        def _gaussian_kernel_energy(width):
-            L = int(np.ceil(4.0 * max(width, 1e-8)))
-            t = np.arange(-L, L + 1)
-            g = np.exp(-0.5 * (t / width) ** 2)
-            g = g / np.sum(g)
-            E = np.sum(g**2)
-            return E
-
-        E_kernel = _gaussian_kernel_energy(gaussian_kernel_width)
-        Delta = E_kernel * pre_center_mean
-
-        # ---------- PCA on corrected covariance ----------
-        X = flattened_dataset
-        C = np.array((X.T @ X) / T)
-        C[np.diag_indices(N)] = np.maximum(C[np.diag_indices(N)] - Delta, 0.0)
-
-        eigvals, eigvecs = np.linalg.eigh(C)
-        idx = np.argsort(eigvals)[::-1]
-        eigs = eigvals[idx]
-        coeff = eigvecs[:, idx]
-        score = X @ coeff
-
-        v_i = coeff[:, :K] * np.sqrt(N)
-        y_t = score[:, :K] / np.sqrt(N)
-
-        lambdas_empirical = eigs[:K] / N
-        normalized_y_t = y_t / np.sqrt(np.var(y_t, axis=0))
-
-        print("Inferring the xi...")
-        Z = utils.generate_gaussian_correlation_matrix(
-            T, np.sqrt(2) * gaussian_kernel_width
+        gradient = predictions_old["d_lambda_d_sqrt_var"] @ (
+            predictions_old["top_eigenvalues"] - lambdas_empirical
         )
-        (
-            tau_kernel,
-            tau_dx,
-            xi_to_sigma_ratios,
-        ) = fit_correlation_times_and_amplitude_ratios(dataset, K, G, Z, mode=mode)
-        print("Done!")
-        print("Inferred tau kernel:", tau_kernel)
-        print("Inferred tau_dx:", tau_dx)
-        print("Inferred xi_to_sigma_ratios:", xi_to_sigma_ratios)
+        new_sqrt_variance = np.abs(
+            np.sqrt(np.var(potential.bar_x, axis=0)) - gamma * gradient
+        )
+        potential.bar_x = normalized_y_t * new_sqrt_variance
+        potential.bar_sigma, potential.bar_xi = recalculate_noise(new_sqrt_variance)
+        potential.update_X()
 
-        Delta_mat = utils.generate_gaussian_correlation_matrix(T, tau_dx)
-        Xi = np.zeros((T, T))
+        predictions = make_predictions(
+            potential, scale_factor=scale_factor, return_R=True
+        )
 
-        # Use corrected per-neuron variance baseline
-        total_variance_corr = np.maximum(total_variance_raw - Delta, 0.0)
+        R_diag_elements_old = jnp.einsum("dii->di", predictions_old["R"]) + np.sqrt(
+            eps
+        )
+        R_diag_elements = jnp.einsum("dii->di", predictions["R"]) + np.sqrt(eps)
 
-        def recalculate_noise(sqrt_signal_variances):
-            signal_variances = sqrt_signal_variances**2
-            noise_variance = jnp.clip(
-                total_variance_corr - jnp.einsum("k,ik->i", signal_variances, v_i**2),
-                0,
-            )
-            denum_non_sigma = (
-                jnp.einsum("dk,ik,dii->", xi_to_sigma_ratios, v_i**2, G) / N
-            )
-            mean_sigma_squared_estimation = (
-                jnp.sum(noise_variance) / N / (N + denum_non_sigma)
-            )
-            xi_k_estimation = jnp.sqrt(
-                mean_sigma_squared_estimation * xi_to_sigma_ratios
-            )
-            sigma_i_estimation = jnp.sqrt(
-                jnp.clip(
-                    noise_variance
-                    - jnp.einsum("dk,ik,dii->i", xi_k_estimation**2, v_i**2, G),
-                    0,
-                )
-                / N
-            )
-            return sigma_i_estimation, xi_k_estimation
-
-        sigma_i, xi_k = recalculate_noise(jnp.sqrt(jnp.var(y_t, axis=0)))
-
-        # Build diagonal potentials (unchanged)
-        potentials = [
-            classes.Potential(
-                sigma_i,
-                v_i[:, k : k + 1],  # [N,1]
-                G,
-                xi_k[:, k : k + 1],  # [D,1]
-                Z,
-                Delta_mat,
-                y_t[:, k : k + 1],  # [T,1]
-                Xi,
-            )
-            for k in range(K)
-        ]
-
-        old_Rs = np.zeros([D, K, K])
-        for k in range(K):
-            old_Rs[:, k, k] = potentials[k].find_solution().R[:, 0, 0]
-
-        relative_top_eigenvalue_difference = np.inf
-        improvement = np.inf
-        eps = 1e-4
-
-        while (
-            relative_top_eigenvalue_difference > eig_difference_cutoff
-            and improvement > improvement_cutoff
-            and gamma > 1e-4
-        ):
-            top_eigenvalues = np.zeros(K)
-            derivs = np.zeros((K, K))
-            Rs = np.zeros([D, K, K])
-
-            for k in range(K):
-                preds = make_predictions(
-                    potentials[k], compute_derivative=True, return_R=True
-                )
-                top_eigenvalues[k] = preds["top_eigenvalues"][0]
-                derivs[k, k] = preds["d_lambda_d_sqrt_var"][0, 0]
-                Rs[:, k, k] = preds["R"][:, 0, 0]
-
-            R_diag_old = jnp.einsum("dii->di", old_Rs) + np.sqrt(eps)
-            R_diag_new = jnp.einsum("dii->di", Rs) + np.sqrt(eps)
-
-            gradient = derivs @ (top_eigenvalues - lambdas_empirical)
-            new_sqrt_variance = np.zeros(K)
-
-            for k in range(K):
-                new_sqrt_variance[k] = np.abs(
-                    np.sqrt(np.var(potentials[k].bar_x, axis=0)) - gamma * gradient[k]
-                )
-                potentials[k].bar_x = (
-                    normalized_y_t[:, k, np.newaxis] * new_sqrt_variance[k]
-                )
-
-            new_sigma, new_xi = recalculate_noise(new_sqrt_variance)
-
-            for k in range(K):
-                potentials[k].bar_sigma = new_sigma
-                potentials[k].bar_xi = new_xi[:, k, np.newaxis]
-                potentials[k].update_X()
-
-            old_Rs = Rs
-
-            top_eigenvalue_difference = jnp.sum(
-                jnp.abs(top_eigenvalues - lambdas_empirical)
-            )
-            old_relative = relative_top_eigenvalue_difference
-            relative_top_eigenvalue_difference = top_eigenvalue_difference / jnp.sum(
-                jnp.abs(lambdas_empirical)
-            )
-            improvement = (
-                np.abs(old_relative - relative_top_eigenvalue_difference)
-                / relative_top_eigenvalue_difference
-            )
+        if jnp.min(R_diag_elements / R_diag_elements_old) < 0.5:
+            gamma /= 2
+        else:
+            predictions_old = predictions
             gamma = init_gamma
 
-            print(
-                "Improvement:",
-                improvement,
-                "Lambdas (predicted):",
-                top_eigenvalues,
-                "Lambdas (empirical):",
-                lambdas_empirical,
-            )
-            print("Predicted R:", R_diag_old)
-
-        return potentials, tau_dx
-
-else:
-
-    def fit_statistics_from_dataset(
-        dataset,
-        K,
-        G,
-        gaussian_kernel_width,
-        mode="trial-averaged",
-        gamma=0.5,
-        eig_difference_cutoff=1e-2,
-        improvement_cutoff=1e-3,
-        scale_factor=10.0,
-    ):
-        jax.config.update("jax_enable_x64", True)
-
-        init_gamma = gamma
-        n_trials, T_single_trial, N = dataset.shape
-
-        if mode == "trial-averaged":
-            flattened_dataset = np.mean(dataset, axis=0)
-            T = T_single_trial
-        elif mode == "trial-concatenated":
-            flattened_dataset = np.reshape(dataset, [n_trials * T_single_trial, N])
-            T = n_trials * T_single_trial
-        else:
-            raise ValueError(
-                'Please select the way to treat your trials: "trial-averaged" or "trial-concatenated".'
-            )
-
-        flattened_dataset -= np.mean(flattened_dataset, axis=0, keepdims=True)
-        total_variance = np.sum(flattened_dataset**2, axis=0) / T
-
-        coeff, score, eigs = utils.PCA_matlab_like(flattened_dataset)
-        v_i = coeff[:, :K] * np.sqrt(N)
-        y_t = score[:, :K] / np.sqrt(N)
-
-        lambdas_empirical = eigs[:K] / N
-        normalized_y_t = y_t / np.sqrt(np.var(y_t, axis=0))
-
-        Z = utils.generate_gaussian_correlation_matrix(
-            T, np.sqrt(2) * gaussian_kernel_width
+        top_eigenvalue_difference = jnp.sum(
+            jnp.abs(predictions["top_eigenvalues"] - lambdas_empirical)
         )
-        (
-            tau_kernel,
-            tau_dx,
-            xi_to_sigma_ratios,
-        ) = fit_correlation_times_and_amplitude_ratios(dataset, K, G, Z, mode=mode)
+        old_relative = relative_top_eigenvalue_difference
+        relative_top_eigenvalue_difference = top_eigenvalue_difference / jnp.sum(
+            jnp.abs(lambdas_empirical)
+        )
+        improvement = (
+            np.abs(old_relative - relative_top_eigenvalue_difference)
+            / relative_top_eigenvalue_difference
+        )
 
-        print("Inferred tau kernel:", tau_kernel)
-        print("Inferred tau_dx:", tau_dx)
-        print("Inferred xi_to_sigma_ratios:", xi_to_sigma_ratios)
-        # Debug
-        # xi_to_sigma_ratios = np.zeros(K)
-        # tau_dx=0
+        print("Relative eigenvalue difference:", relative_top_eigenvalue_difference)
+        print("Improvement:", improvement)
+        print("Rho:", predictions["rho"])
 
-        Delta = utils.generate_gaussian_correlation_matrix(T, tau_dx)
-        Xi = np.zeros((T, T))
+    return potential
 
-        def recalculate_noise(sqrt_signal_variances):
-            noise_variance = jnp.clip(
-                total_variance
-                - jnp.einsum("k,ik->i", sqrt_signal_variances**2, v_i**2),
+def fit_statistics_from_dataset_diagonal(
+    dataset,
+    K,
+    G,
+    gaussian_kernel_width,
+    mode="trial-averaged",
+    gamma=0.7,
+    eig_difference_cutoff=1e-2,
+    improvement_cutoff=1e-3,
+):
+
+    jax.config.update("jax_enable_x64", True)
+
+    D = np.shape(G)[0]
+    init_gamma = gamma
+    n_trials, T_single_trial, N = dataset.shape
+
+    # ---------- Build flattened data & keep pre-centering means ----------
+    if mode == "trial-averaged":
+        flattened_dataset = np.mean(dataset, axis=0)  # s_i(t)
+        T = T_single_trial
+    elif mode == "trial-concatenated":
+        flattened_dataset = np.reshape(
+            dataset, [n_trials * T_single_trial, N]
+        )  # s_i(t)
+        T = n_trials * T_single_trial
+    else:
+        raise ValueError(
+            'Please select either "trial-averaged" or "trial-concatenated".'
+        )
+
+    pre_center_mean = np.mean(flattened_dataset, axis=0)  # \bar{s_i}
+    flattened_dataset = flattened_dataset - pre_center_mean[None, :]
+
+    total_variance_raw = np.sum(flattened_dataset**2, axis=0) / T
+
+    # ---------- Poisson-aware diagonal correction ----------
+    def _gaussian_kernel_energy(width):
+        L = int(np.ceil(4.0 * max(width, 1e-8)))
+        t = np.arange(-L, L + 1)
+        g = np.exp(-0.5 * (t / width) ** 2)
+        g = g / np.sum(g)
+        E = np.sum(g**2)
+        return E
+
+    E_kernel = _gaussian_kernel_energy(gaussian_kernel_width)
+    Delta = E_kernel * pre_center_mean
+
+    # ---------- PCA on corrected covariance ----------
+    X = flattened_dataset
+    C = np.array((X.T @ X) / T)
+    C[np.diag_indices(N)] = np.maximum(C[np.diag_indices(N)] - Delta, 0.0)
+
+    eigvals, eigvecs = np.linalg.eigh(C)
+    idx = np.argsort(eigvals)[::-1]
+    eigs = eigvals[idx]
+    coeff = eigvecs[:, idx]
+    score = X @ coeff
+
+    v_i = coeff[:, :K] * np.sqrt(N)
+    y_t = score[:, :K] / np.sqrt(N)
+
+    lambdas_empirical = eigs[:K] / N
+    normalized_y_t = y_t / np.sqrt(np.var(y_t, axis=0))
+
+    print("Inferring the xi...")
+    Z = utils.generate_gaussian_correlation_matrix(
+        T, np.sqrt(2) * gaussian_kernel_width
+    )
+    (
+        tau_kernel,
+        tau_dx,
+        xi_to_sigma_ratios,
+    ) = fit_correlation_times_and_amplitude_ratios(dataset, K, G, Z, mode=mode)
+    print("Done!")
+    print("Inferred tau kernel:", tau_kernel)
+    print("Inferred tau_dx:", tau_dx)
+    print("Inferred xi_to_sigma_ratios:", xi_to_sigma_ratios)
+
+    Delta_mat = utils.generate_gaussian_correlation_matrix(T, tau_dx)
+    Xi = np.zeros((T, T))
+
+    # Use corrected per-neuron variance baseline
+    total_variance_corr = np.maximum(total_variance_raw - Delta, 0.0)
+
+    def recalculate_noise(sqrt_signal_variances):
+        signal_variances = sqrt_signal_variances**2
+        noise_variance = jnp.clip(
+            total_variance_corr - jnp.einsum("k,ik->i", signal_variances, v_i**2),
+            0,
+        )
+        denum_non_sigma = (
+            jnp.einsum("dk,ik,dii->", xi_to_sigma_ratios, v_i**2, G) / N
+        )
+        mean_sigma_squared_estimation = (
+            jnp.sum(noise_variance) / N / (N + denum_non_sigma)
+        )
+        xi_k_estimation = jnp.sqrt(
+            mean_sigma_squared_estimation * xi_to_sigma_ratios
+        )
+        sigma_i_estimation = jnp.sqrt(
+            jnp.clip(
+                noise_variance
+                - jnp.einsum("dk,ik,dii->i", xi_k_estimation**2, v_i**2, G),
                 0,
             )
-            denum_non_sigma = (
-                jnp.einsum("dk,ik,dii->", xi_to_sigma_ratios, v_i**2, G) / N
-            )
-            mean_sigma_squared_estimation = (
-                jnp.sum(noise_variance) / N / (N + denum_non_sigma)
-            )
-            xi_k_estimation = jnp.sqrt(
-                mean_sigma_squared_estimation * xi_to_sigma_ratios
-            )
-            sigma_i_estimation = jnp.sqrt(
-                jnp.clip(
-                    noise_variance
-                    - jnp.einsum("dk,ik,dii->i", xi_k_estimation**2, v_i**2, G),
-                    0,
-                )
-                / N
-            )
-            return sigma_i_estimation, xi_k_estimation
-
-        sigma_i, xi_k = recalculate_noise(np.sqrt(np.var(y_t, axis=0)))
-        potential = classes.Potential(sigma_i, v_i, G, xi_k, Z, Delta, y_t, Xi)
-
-        relative_top_eigenvalue_difference = np.inf
-        improvement = np.inf
-        eps = 1e-4
-
-        predictions_old = make_predictions(
-            potential, scale_factor=scale_factor, compute_derivative=True, return_R=True
+            / N
         )
+        return sigma_i_estimation, xi_k_estimation
 
-        while (
-            relative_top_eigenvalue_difference > eig_difference_cutoff
-            and improvement > improvement_cutoff
-            and gamma > 1e-4
-        ):
-            gradient = predictions_old["d_lambda_d_sqrt_var"] @ (
-                predictions_old["top_eigenvalues"] - lambdas_empirical
-            )
-            new_sqrt_variance = np.abs(
-                np.sqrt(np.var(potential.bar_x, axis=0)) - gamma * gradient
-            )
-            potential.bar_x = normalized_y_t * new_sqrt_variance
-            potential.bar_sigma, potential.bar_xi = recalculate_noise(new_sqrt_variance)
-            potential.update_X()
+    sigma_i, xi_k = recalculate_noise(jnp.sqrt(jnp.var(y_t, axis=0)))
 
-            predictions = make_predictions(
-                potential, scale_factor=scale_factor, return_R=True
-            )
+    # Build diagonal potentials (unchanged)
+    potentials = [
+        classes.Potential(
+            sigma_i,
+            v_i[:, k : k + 1],  # [N,1]
+            G,
+            xi_k[:, k : k + 1],  # [D,1]
+            Z,
+            Delta_mat,
+            y_t[:, k : k + 1],  # [T,1]
+            Xi,
+        )
+        for k in range(K)
+    ]
 
-            R_diag_elements_old = jnp.einsum("dii->di", predictions_old["R"]) + np.sqrt(
-                eps
-            )
-            R_diag_elements = jnp.einsum("dii->di", predictions["R"]) + np.sqrt(eps)
+    old_Rs = np.zeros([D, K, K])
+    for k in range(K):
+        old_Rs[:, k, k] = potentials[k].find_solution().R[:, 0, 0]
 
-            if jnp.min(R_diag_elements / R_diag_elements_old) < 0.5:
-                gamma /= 2
-            else:
-                predictions_old = predictions
-                gamma = init_gamma
+    relative_top_eigenvalue_difference = np.inf
+    improvement = np.inf
+    eps = 1e-4
 
-            top_eigenvalue_difference = jnp.sum(
-                jnp.abs(predictions["top_eigenvalues"] - lambdas_empirical)
-            )
-            old_relative = relative_top_eigenvalue_difference
-            relative_top_eigenvalue_difference = top_eigenvalue_difference / jnp.sum(
-                jnp.abs(lambdas_empirical)
-            )
-            improvement = (
-                np.abs(old_relative - relative_top_eigenvalue_difference)
-                / relative_top_eigenvalue_difference
-            )
-
-            print("Relative eigenvalue difference:", relative_top_eigenvalue_difference)
-            print("Improvement:", improvement)
-            print("Rho:", predictions["rho"])
-
-        return potential
-
-    def fit_statistics_from_dataset_diagonal(
-        dataset,
-        K,
-        G,
-        gaussian_kernel_width,
-        mode="trial-averaged",
-        gamma=0.7,
-        eig_difference_cutoff=1e-2,
-        improvement_cutoff=1e-3,
+    while (
+        relative_top_eigenvalue_difference > eig_difference_cutoff
+        and improvement > improvement_cutoff
+        and gamma > 1e-4
     ):
-        import copy
-        import numpy as np
-        import jax
-        import jax.numpy as jnp
-        from . import utils, classes
-        from .functions import make_predictions
+        top_eigenvalues = np.zeros(K)
+        derivs = np.zeros((K, K))
+        Rs = np.zeros([D, K, K])
 
-        jax.config.update("jax_enable_x64", True)
-
-        D = np.shape(G)[0]
-        init_gamma = gamma
-        n_trials, T_single_trial, N = dataset.shape
-
-        if mode == "trial-averaged":
-            flattened_dataset = np.mean(dataset, axis=0)
-            T = T_single_trial
-        elif mode == "trial-concatenated":
-            flattened_dataset = np.reshape(dataset, [n_trials * T_single_trial, N])
-            T = n_trials * T_single_trial
-        else:
-            raise ValueError(
-                'Please select either "trial-averaged" or "trial-concatenated".'
-            )
-
-        flattened_dataset -= np.mean(flattened_dataset, axis=0, keepdims=True)
-        total_variance = np.sum(flattened_dataset**2, axis=0) / T
-
-        coeff, score, eigs = utils.PCA_matlab_like(flattened_dataset)
-        v_i = coeff[:, :K] * np.sqrt(N)
-        y_t = score[:, :K] / np.sqrt(N)
-
-        lambdas_empirical = eigs[:K] / N
-        normalized_y_t = y_t / np.sqrt(np.var(y_t, axis=0))
-
-        print("Inferring the xi...")
-        Z = utils.generate_gaussian_correlation_matrix(
-            T, np.sqrt(2) * gaussian_kernel_width
-        )
-        (
-            tau_kernel,
-            tau_dx,
-            xi_to_sigma_ratios,
-        ) = fit_correlation_times_and_amplitude_ratios(dataset, K, G, Z, mode=mode)
-        print("Done!")
-        print("Inferred tau kernel:", tau_kernel)
-        print("Inferred tau_dx:", tau_dx)
-        print("Inferred xi_to_sigma_ratios:", xi_to_sigma_ratios)
-        # Debug
-        # xi_to_sigma_ratios = np.zeros([D,K])
-        # tau_dx=0
-
-        Delta = utils.generate_gaussian_correlation_matrix(T, tau_dx)
-        Xi = np.zeros((T, T))
-
-        def recalculate_noise(sqrt_signal_variances):
-            signal_variances = sqrt_signal_variances**2
-            noise_variance = jnp.clip(
-                total_variance - jnp.einsum("k,ik->i", signal_variances, v_i**2), 0
-            )
-            denum_non_sigma = (
-                jnp.einsum("dk,ik,dii->", xi_to_sigma_ratios, v_i**2, G) / N
-            )
-            mean_sigma_squared_estimation = (
-                jnp.sum(noise_variance) / N / (N + denum_non_sigma)
-            )
-            xi_k_estimation = jnp.sqrt(
-                mean_sigma_squared_estimation * xi_to_sigma_ratios
-            )
-            sigma_i_estimation = jnp.sqrt(
-                jnp.clip(
-                    noise_variance
-                    - jnp.einsum("dk,ik,dii->i", xi_k_estimation**2, v_i**2, G),
-                    0,
-                )
-                / N
-            )
-            return sigma_i_estimation, xi_k_estimation
-
-        sigma_i, xi_k = recalculate_noise(jnp.sqrt(jnp.var(y_t, axis=0)))
-
-        # Build diagonal potentials
-        potentials = [
-            classes.Potential(
-                sigma_i,
-                v_i[:, k : k + 1],  # shape [N,1]
-                G,
-                xi_k[:, k : k + 1],  # shape [D,1]
-                Z,
-                Delta,
-                y_t[:, k : k + 1],  # shape [T,1]
-                Xi,
-            )
-            for k in range(K)
-        ]
-
-        old_Rs = np.zeros([D, K, K])
         for k in range(K):
-            old_Rs[:, k, k] = potentials[k].find_solution().R[:, 0, 0]
-
-        relative_top_eigenvalue_difference = np.inf
-        improvement = np.inf
-        eps = 1e-4
-
-        while (
-            relative_top_eigenvalue_difference > eig_difference_cutoff
-            and improvement > improvement_cutoff
-            and gamma > 1e-4
-        ):
-            top_eigenvalues = np.zeros(K)
-            derivs = np.zeros((K, K))
-            Rs = np.zeros([D, K, K])
-
-            for k in range(K):
-                preds = make_predictions(
-                    potentials[k], compute_derivative=True, return_R=True
-                )
-                top_eigenvalues[k] = preds["top_eigenvalues"][0]
-                derivs[k, k] = preds["d_lambda_d_sqrt_var"][0, 0]
-                Rs[:, k, k] = preds["R"][:, 0, 0]
-
-            # Check R-stability condition
-            R_diag_old = jnp.einsum("dii->di", old_Rs) + np.sqrt(eps)
-            R_diag_new = jnp.einsum("dii->di", Rs) + np.sqrt(eps)
-
-            # if jnp.min(R_diag_new / R_diag_old) < 0.5:
-            #    gamma /= 2
-            #    print("Decreased step. gamma=", gamma)
-            # else:
-            # Update signal amplitudes
-            gradient = derivs @ (top_eigenvalues - lambdas_empirical)
-            new_sqrt_variance = np.zeros(K)
-
-            for k in range(K):
-                new_sqrt_variance[k] = np.abs(
-                    np.sqrt(np.var(potentials[k].bar_x, axis=0)) - gamma * gradient[k]
-                )
-                potentials[k].bar_x = (
-                    normalized_y_t[:, k, np.newaxis] * new_sqrt_variance[k]
-                )
-
-            new_sigma, new_xi = recalculate_noise(new_sqrt_variance)
-
-            for k in range(K):
-                potentials[k].bar_sigma = new_sigma
-                potentials[k].bar_xi = new_xi[:, k, np.newaxis]
-                potentials[k].update_X()
-
-            old_Rs = Rs
-
-            top_eigenvalue_difference = jnp.sum(
-                jnp.abs(top_eigenvalues - lambdas_empirical)
+            preds = make_predictions(
+                potentials[k], compute_derivative=True, return_R=True
             )
-            old_relative = relative_top_eigenvalue_difference
-            relative_top_eigenvalue_difference = top_eigenvalue_difference / jnp.sum(
-                jnp.abs(lambdas_empirical)
-            )
-            improvement = (
-                np.abs(old_relative - relative_top_eigenvalue_difference)
-                / relative_top_eigenvalue_difference
-            )
-            gamma = init_gamma
+            top_eigenvalues[k] = preds["top_eigenvalues"][0]
+            derivs[k, k] = preds["d_lambda_d_sqrt_var"][0, 0]
+            Rs[:, k, k] = preds["R"][:, 0, 0]
 
-            print(
-                "Improvement:",
-                improvement,
-                "Lambdas (predicted):",
-                top_eigenvalues,
-                "Lambdas (empirical):",
-                lambdas_empirical,
+        R_diag_old = jnp.einsum("dii->di", old_Rs) + np.sqrt(eps)
+        R_diag_new = jnp.einsum("dii->di", Rs) + np.sqrt(eps)
+
+        gradient = derivs @ (top_eigenvalues - lambdas_empirical)
+        new_sqrt_variance = np.zeros(K)
+
+        for k in range(K):
+            new_sqrt_variance[k] = np.abs(
+                np.sqrt(np.var(potentials[k].bar_x[:,0], axis=0)) - gamma * gradient[k]
             )
-            print("Predicted R:", R_diag_old)
+            potentials[k].bar_x = (
+                normalized_y_t[:, k, np.newaxis] * new_sqrt_variance[k]
+            )
 
-        return potentials, tau_dx
+        new_sigma, new_xi = recalculate_noise(new_sqrt_variance)
 
+        for k in range(K):
+            potentials[k].bar_sigma = new_sigma
+            potentials[k].bar_xi = new_xi[:, k, np.newaxis]
+            potentials[k].update_X()
+
+        old_Rs = Rs
+
+        top_eigenvalue_difference = jnp.sum(
+            jnp.abs(top_eigenvalues - lambdas_empirical)
+        )
+        old_relative = relative_top_eigenvalue_difference
+        relative_top_eigenvalue_difference = top_eigenvalue_difference / jnp.sum(
+            jnp.abs(lambdas_empirical)
+        )
+        improvement = (
+            np.abs(old_relative - relative_top_eigenvalue_difference)
+            / relative_top_eigenvalue_difference
+        )
+        gamma = init_gamma
+
+        print(
+            "Improvement:",
+            improvement,
+            "Lambdas (predicted):",
+            top_eigenvalues,
+            "Lambdas (empirical):",
+            lambdas_empirical,
+        )
+        print("Predicted R:", R_diag_old)
+
+    return potentials, tau_dx
 
 def estimate_xi_sigma_ratio_knownK(
     data, Z, Delta, G, K, n_boot=100, band_threshold=1e-6, rng=None
@@ -1521,3 +1182,210 @@ def extrapolate_potential(
     # Recompute X based on potentially updated bar_x
     pot.update_X()
     return pot
+
+
+def asymptotic_regime_trials(
+    pot,
+    *,
+    n_trials=1,
+    delta_rho=0.01,
+    delta_epsilon=0.01,
+):
+    """
+    Analytical asymptotic-onset estimate for increasing number of trials r.
+
+    Uses:
+        rho(r) ~ rho_1 / r,        rho_inf = 0
+        epsilon(r) ~ epsilon_1 / r, epsilon_inf = 0
+
+    Parameters
+    ----------
+    pot : Potential
+        One fitted Potential, usually corresponding to one PC.
+    n_trials : int
+        Number of trials used to infer this Potential.
+    delta_rho, delta_epsilon : float
+        Tolerances for declaring saturation.
+
+    Returns
+    -------
+    dict
+        Analytical asymptotic values and estimated onset trial counts.
+    """
+
+    N=pot.bar_sigma.shape[0]
+    T=pot.bar_x.shape[0]
+    V = np.var(pot.bar_x,axis=0)
+    print(V)
+    print(np.mean(V))
+
+    rho_scale=1 # It is logical to think about the saturation as a fraction from "worst" possible rho, so 1.
+    epsilon_scale=V #It is logical to think about saturation in terms of the variance of the signal
+
+    rho_inf = 0.0
+    epsilon_inf = 0.0
+
+
+    sigma_true = np.sqrt(np.mean(pot.bar_sigma**2*N*n_trials))
+
+    rho_1 = sigma_true**2 / (2.0 * T * V)
+    epsilon_1 = sigma_true**2 / N
+
+    print("epsilon_1=", epsilon_1)
+
+    r_asymp_rho = abs(np.mean(rho_1)) / (delta_rho * np.mean(rho_scale))
+    r_asymp_epsilon = abs(np.mean(epsilon_1)) / (delta_epsilon * np.mean(epsilon_scale))
+
+    return r_asymp_rho, r_asymp_epsilon
+
+def asymptotic_regime_neurons(
+    pot,
+    *,
+    n_trials=1,
+    delta_rho=0.01,
+    delta_epsilon=0.01,
+):
+    """
+    Analytical asymptotic-onset estimate for increasing number of neurons N.
+
+    Uses:
+        rho(N) = rho_inf + rho_1 / N + O(1/N^2)
+        epsilon(N) = epsilon_inf + epsilon_1 / N + O(1/N^2)
+
+    Parameters
+    ----------
+    pot : Potential
+        One fitted Potential, usually corresponding to one PC.
+    n_trials : int
+        Number of trials used to infer this Potential.
+    delta_rho, delta_epsilon : float
+        Tolerances for declaring saturation.
+
+    Returns
+    -------
+    tuple
+        Estimated asymptotic-onset neuron counts for rho and epsilon.
+    """
+
+    N = pot.bar_sigma.shape[0]
+    T = pot.bar_x.shape[0]
+    V = np.var(pot.bar_x, axis=0)
+
+    sigma_true = np.sqrt(np.mean(pot.bar_sigma**2 * N * n_trials))
+    print("sigma true:", sigma_true)
+    print("sigma^2 usual:", np.mean(pot.bar_sigma**2))
+    print("var(x):", V)
+
+    S = sigma_true**2
+
+    R_inf = np.sqrt((n_trials * T * V) / (n_trials * T * V + S))
+
+    epsilon_inf = (-2.0 * S * R_inf - 2.0 * n_trials * T * V * R_inf
+                          + 2.0 * n_trials * T * V + S ) / (n_trials * T)
+
+    rho_inf = 1-R_inf
+
+    # R(N) = R_inf + R_1 / N + O(1/N^2)
+    R_1 = -(S**2
+        * np.sqrt((n_trials * T * V) / (n_trials * T * V + S))
+        / (2.0 * T * n_trials**2 * V**2)
+    )
+
+    # rho = 1 - R, hence rho_1 = -R_1
+    rho_1 = -R_1
+
+    epsilon_1 = (
+        (n_trials * T * V + S)
+        * (n_trials * S * T * V + S**2 * R_inf)
+        / (n_trials**3 * T**2 * V**2)
+    )
+
+    print("R_inf:", R_inf)
+    print("R_1:", R_1)
+    print("Epsilon_inf:", epsilon_inf)
+    print("Epsilon_1:", epsilon_1)
+
+    rho_scale = 1
+    epsilon_scale = V
+
+    N_asymp_rho = abs(rho_1) / (delta_rho * rho_scale)
+    N_asymp_epsilon = abs(epsilon_1) / (delta_epsilon * epsilon_scale)
+
+    return N_asymp_rho, N_asymp_epsilon
+
+def asymptotic_regime_animals(
+    pot,
+    *,
+    n_trials=1,
+    delta_rho=0.01,
+    delta_epsilon=0.01,
+):
+    """
+    Analytical asymptotic-onset estimate for increasing number of animals a.
+
+    Assumes:
+        N = a * Na,
+
+    where Na is the average number of neurons per animal.
+
+    Uses:
+        rho(a) = rho_inf + rho_1 / a + O(1/a^2)
+        epsilon(a) = epsilon_inf + epsilon_1 / a + O(1/a^2)
+
+    Parameters
+    ----------
+    pot : Potential
+        One fitted Potential, usually corresponding to one PC.
+        Must have pot.G of shape [D, N, N].
+    n_trials : int
+        Number of trials used to infer this Potential.
+    delta_rho, delta_epsilon : float
+        Tolerances for declaring saturation.
+
+    Returns
+    -------
+    tuple
+        Estimated asymptotic-onset animal counts for rho and epsilon.
+    """
+
+    N = pot.bar_sigma.shape[0]
+    T = pot.bar_x.shape[0]
+    V = np.var(pot.bar_x, axis=0)
+
+    G = np.asarray(pot.G)
+    D = G.shape[0]
+    Na = N / D
+
+    rho_scale = 1
+    epsilon_scale = V
+
+    sigma_true = np.sqrt(np.mean(pot.bar_sigma**2 * N * n_trials))
+    S = sigma_true**2
+
+    R_inf = np.sqrt((n_trials * T * V) / (n_trials * T * V + S))
+
+    # First compute the 1/N coefficients.
+    R_1_N = -(
+        S**2
+        * np.sqrt((n_trials * T * V) / (n_trials * T * V + S))
+        / (2.0 * T * n_trials**2 * V**2)
+    )
+
+    rho_1_N = -R_1_N
+
+    epsilon_1_N = (
+        (n_trials * T * V + S)
+        * (n_trials * S * T * V + S**2 * R_inf)
+        / (n_trials**3 * T**2 * V**2)
+    )
+
+    # Since N = a * Na, a 1/N correction becomes:
+    #     f_1_N / N = f_1_N / (a * Na) = (f_1_N / Na) / a
+    rho_1_a = rho_1_N / Na
+    epsilon_1_a = epsilon_1_N / Na
+
+    a_asymp_rho = abs(rho_1_a) / (delta_rho * rho_scale)
+    a_asymp_epsilon = abs(epsilon_1_a) / (delta_epsilon * epsilon_scale)
+
+    return a_asymp_rho, a_asymp_epsilon
+

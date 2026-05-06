@@ -336,3 +336,202 @@ def get_empirical_accuracy_array(full_data, K, G, mode, size_axis, size_values):
         )
 
     return rho_array, epsilon_array
+
+
+def align_pca_to_reference(
+    coeff,
+    reference_vectors,
+    score=None,
+    *,
+    scale_loadings=None,
+    scale_scores=None,
+    copy=True,
+):
+    """
+    Align PCA components to reference vectors by flipping signs component-wise.
+
+    Parameters
+    ----------
+    coeff : array_like, shape (N, M)
+        PCA loading vectors / eigenvectors. Only the first K columns are used,
+        where K = reference_vectors.shape[1].
+    reference_vectors : array_like, shape (N, K)
+        Reference loading vectors to align to.
+    score : array_like | None, shape (T, M)
+        Optional PCA scores. If provided, the same sign flips are applied to the
+        first K score columns.
+    scale_loadings : float | None
+        If not None, multiply the aligned loadings by this factor after sign
+        alignment. Useful for conventions like ||v^(k)|| = sqrt(N).
+    scale_scores : float | None
+        If not None, multiply the aligned scores by this factor after sign
+        alignment. Useful for conventions like y_t = score / sqrt(N).
+    copy : bool
+        If True, work on copies and leave inputs unchanged.
+
+    Returns
+    -------
+    aligned_coeff : np.ndarray, shape (N, K)
+        Sign-aligned loading vectors.
+    aligned_score : np.ndarray | None, shape (T, K)
+        Sign-aligned scores if `score` was provided, otherwise None.
+    signs : np.ndarray, shape (K,)
+        Sign applied to each component (+1 or -1).
+
+    Notes
+    -----
+    - Alignment is done independently for each component k using the sign of
+      dot(coeff[:, k], reference_vectors[:, k]).
+    - If the dot product is exactly zero, the sign is taken to be +1.
+    """
+    coeff = np.array(coeff, copy=copy, dtype=float)
+    ref = np.asarray(reference_vectors, dtype=float)
+
+    if coeff.ndim != 2:
+        raise ValueError("coeff must be a 2D array of shape (N, M).")
+    if ref.ndim != 2:
+        raise ValueError("reference_vectors must be a 2D array of shape (N, K).")
+    if coeff.shape[0] != ref.shape[0]:
+        raise ValueError("coeff and reference_vectors must have the same number of rows.")
+
+    K = ref.shape[1]
+    if coeff.shape[1] < K:
+        raise ValueError("coeff must have at least as many columns as reference_vectors.")
+
+    aligned_coeff = coeff[:, :K]
+
+    aligned_score = None
+    if score is not None:
+        aligned_score = np.array(score, copy=copy, dtype=float)
+        if aligned_score.ndim != 2:
+            raise ValueError("score must be a 2D array of shape (T, M).")
+        if aligned_score.shape[1] < K:
+            raise ValueError("score must have at least as many columns as reference_vectors.")
+        aligned_score = aligned_score[:, :K]
+
+    overlaps = np.sum(aligned_coeff * ref, axis=0)
+    signs = np.where(overlaps >= 0.0, 1.0, -1.0)
+
+    aligned_coeff = aligned_coeff * signs[np.newaxis, :]
+
+    if aligned_score is not None:
+        aligned_score = aligned_score * signs[np.newaxis, :]
+
+    if scale_loadings is not None:
+        aligned_coeff = aligned_coeff * float(scale_loadings)
+
+    if aligned_score is not None and scale_scores is not None:
+        aligned_score = aligned_score * float(scale_scores)
+
+    return aligned_coeff, aligned_score, signs
+
+import numpy as np
+
+
+def align_pca_to_reference_svd(
+    coeff,
+    reference_vectors,
+    score=None,
+    *,
+    scale_loadings=None,
+    scale_scores=None,
+    copy=True,
+):
+    """
+    Align PCA components to reference vectors using an orthogonal Procrustes
+    rotation of the PCA subspace.
+
+    Parameters
+    ----------
+    coeff : array_like, shape (N, M)
+        PCA loading vectors / eigenvectors. Only the first K columns are used,
+        where K = reference_vectors.shape[1].
+    reference_vectors : array_like, shape (N, K)
+        Reference loading vectors to align to. These are not rotated.
+    score : array_like | None, shape (T, M)
+        Optional PCA scores. If provided, the same orthogonal rotation is
+        applied to the first K score columns.
+    scale_loadings : float | None
+        If not None, multiply the aligned loadings by this factor.
+    scale_scores : float | None
+        If not None, multiply the aligned scores by this factor.
+    copy : bool
+        If True, work on copies and leave inputs unchanged.
+
+    Returns
+    -------
+    aligned_coeff : np.ndarray, shape (N, K)
+        Procrustes-aligned loading vectors.
+    aligned_score : np.ndarray | None, shape (T, K)
+        Procrustes-aligned scores if `score` was provided, otherwise None.
+    Q : np.ndarray, shape (K, K)
+        Orthogonal rotation matrix applied to coeff and score.
+    singular_values : np.ndarray, shape (K,)
+        Singular values of coeff[:, :K].T @ reference_vectors.
+
+    Notes
+    -----
+    The alignment solves
+
+        min_Q || coeff[:, :K] @ Q - reference_vectors ||_F^2
+
+    over orthogonal matrices Q.
+
+    If M = coeff[:, :K].T @ reference_vectors = U S V.T, then
+
+        Q = U @ V.T
+
+    The same Q is applied to scores so that the reconstruction is preserved:
+
+        score @ coeff.T = (score @ Q) @ (coeff @ Q).T
+    """
+    coeff = np.array(coeff, copy=copy, dtype=float)
+    ref = np.asarray(reference_vectors, dtype=float)
+
+    if coeff.ndim != 2:
+        raise ValueError("coeff must be a 2D array of shape (N, M).")
+    if ref.ndim != 2:
+        raise ValueError("reference_vectors must be a 2D array of shape (N, K).")
+    if coeff.shape[0] != ref.shape[0]:
+        raise ValueError("coeff and reference_vectors must have the same number of rows.")
+
+    K = ref.shape[1]
+    if coeff.shape[1] < K:
+        raise ValueError("coeff must have at least as many columns as reference_vectors.")
+
+    coeff_K = coeff[:, :K]
+
+    aligned_score = None
+    if score is not None:
+        score = np.array(score, copy=copy, dtype=float)
+
+        if score.ndim != 2:
+            raise ValueError("score must be a 2D array of shape (T, M).")
+        if score.shape[1] < K:
+            raise ValueError("score must have at least as many columns as reference_vectors.")
+
+        score_K = score[:, :K]
+    else:
+        score_K = None
+
+    M = coeff_K.T @ ref
+    U, singular_values, Vt = np.linalg.svd(M, full_matrices=False)
+
+    Q = U @ Vt
+
+    aligned_coeff = coeff_K @ Q
+
+    if score_K is not None:
+        aligned_score = score_K @ Q
+
+    if scale_loadings is not None:
+        aligned_coeff = aligned_coeff * float(scale_loadings)
+
+    if aligned_score is not None and scale_scores is not None:
+        aligned_score = aligned_score * float(scale_scores)
+
+    return aligned_coeff, aligned_score, Q, singular_values
+
+def to_scalar(x):
+    a = np.asarray(x)
+    return float(a.reshape(-1)[0])

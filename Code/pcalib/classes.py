@@ -38,6 +38,41 @@ class Point:
         self.tilde_W, self.U, self.tilde_v = tilde_W, U, tilde_v
         self.S, self.p, self.tilde_R = S, p, tilde_R
 
+    def align_signs(self):
+        """
+        Resolve the sign ambiguity of latent modes by enforcing a positive
+        diagonal convention on the mode-overlap tensor R.
+
+        This applies the same sign flip consistently to all order parameters
+        that transform with the latent-component basis.
+
+        Returns
+        -------
+        self : Point
+            The same Point instance, modified in place.
+        """
+        R_diags = np.einsum("dkk->k", np.asarray(self.R))
+
+        # Avoid zeros in the sign matrix: treat zero as positive
+        signs = np.where(R_diags >= 0, 1.0, -1.0)
+        c_matrix = np.diag(signs)
+
+        self.R = c_matrix @ self.R
+        self.tilde_R = c_matrix @ self.tilde_R
+
+        self.U = c_matrix @ self.U @ c_matrix
+        self.W = c_matrix @ self.W @ c_matrix
+        self.tilde_W = c_matrix @ self.tilde_W @ c_matrix
+        self.L = c_matrix @ self.L @ c_matrix
+        self.S = c_matrix @ self.S @ c_matrix
+
+        self.v = np.einsum("klmn,am,nb->klab", self.v, c_matrix, c_matrix)
+        self.tilde_v = np.einsum("klmn,am,nb->klab", self.tilde_v, c_matrix, c_matrix)
+        self.p = np.einsum("klmn,am,nb->klab", self.p, c_matrix, c_matrix)
+        self.r = np.einsum("klmn,am,nb->klab", self.r, c_matrix, c_matrix)
+
+        return self
+
     # Iterator over attributes to later flatten/unflatten them to do the high-dim optimization
     def _iter_fields(self):
         for name in self._FIELDS:
@@ -1146,47 +1181,16 @@ class Potential:
             update_with_pinv = jnp.linalg.pinv(hess, hermitian=True) @ grad_flat
             updated_flattened_point = flattened_point - gamma * update_with_pinv
             point_new.update_from_vector(updated_flattened_point)
+
             if np.linalg.norm(updated_flattened_point - flattened_point) < eps:
-                point = copy.deepcopy(point_new)
-
-                # Flipping signs of v, if accidentally happen to be anti-aligned
-                R_diags = np.einsum("dkk->k", point.R)
-                c_matrix = np.diag(np.sign(R_diags))
-                point.R = c_matrix @ point.R
-                point.tilde_R = c_matrix @ point.tilde_R
-                point.U = c_matrix @ point.U @ c_matrix
-                point.W = c_matrix @ point.W @ c_matrix
-                point.tilde_W = c_matrix @ point.tilde_W @ c_matrix
-                point.L = c_matrix @ point.L @ c_matrix
-                point.S = c_matrix @ point.S @ c_matrix
-                point.v = np.einsum("klmn,am,nb->klab", point.v, c_matrix, c_matrix)
-                point.tilde_v = np.einsum(
-                    "klmn,am,nb->klab", point.tilde_v, c_matrix, c_matrix
-                )
-                point.p = np.einsum("klmn,am,nb->klab", point.p, c_matrix, c_matrix)
-                point.r = np.einsum("klmn,am,nb->klab", point.r, c_matrix, c_matrix)
-
+                point = copy.deepcopy(point_new).align_signs()
                 return point, True
+
             point = point_new
             flattened_point = updated_flattened_point
 
         del point_new
-        point = copy.deepcopy(point)
-
-        # Flipping signs of v, if accidentally happen to be anti-aligned
-        R_diags = np.einsum("dkk->k", point.R)
-        c_matrix = np.diag(np.sign(R_diags))
-        point.R = c_matrix @ point.R
-        point.tilde_R = c_matrix @ point.tilde_R
-        point.U = c_matrix @ point.U @ c_matrix
-        point.W = c_matrix @ point.W @ c_matrix
-        point.tilde_W = c_matrix @ point.tilde_W @ c_matrix
-        point.L = c_matrix @ point.L @ c_matrix
-        point.S = c_matrix @ point.S @ c_matrix
-        point.v = np.einsum("klmn,am,nb->klab", point.v, c_matrix, c_matrix)
-        point.tilde_v = np.einsum("klmn,am,nb->klab", point.tilde_v, c_matrix, c_matrix)
-        point.p = np.einsum("klmn,am,nb->klab", point.p, c_matrix, c_matrix)
-        point.r = np.einsum("klmn,am,nb->klab", point.r, c_matrix, c_matrix)
+        point = copy.deepcopy(point).align_signs()
 
         return point, False
 
@@ -1898,6 +1902,20 @@ class Potential:
 
         return std_signal_variance
 
+    def estimate_critical_N(self, delta_val=0.1):
+        '''
+        Estimates a proxy for the critical N from the simple case where all sigmas are equal,
+        and there are no temporal smoothing kernel.
+        '''
+        N = self.bar_e.shape[0]
+        T = self.bar_x.shape[0]
+        varX = np.var(self.bar_x, axis=0)
+        mean_xi = np.mean(np.sqrt(self.bar_xi**2),axis=0) #sqrt(mean squared) over D-dimension
+        sigma_real = np.sqrt(np.mean(self.bar_sigma**2)*N) # sqrt(mean squared variance)
+        rho_1 = sigma_real**4 / (2 * np.sqrt(T*(varX + mean_xi**2)**3 * ((varX + mean_xi**2)*T + sigma_real**2)))
+        # Now solving the equation of rho_1/N_crit >= delta_val
+        N_crit = rho_1/delta_val
+        return N_crit
 
 jax.tree_util.register_pytree_node(Point, Point.tree_flatten, Point.tree_unflatten)
 jax.tree_util.register_pytree_node(
