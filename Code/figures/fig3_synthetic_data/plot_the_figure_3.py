@@ -193,7 +193,7 @@ def create_subfigure_A(
         ax.set_ylim(y_low, y_high)
         ax.tick_params(labelsize=7, length=2.5)
 
-        ax.set_title(f"k={k+1}, d={d+1}", fontsize=9, pad=1.5)
+        ax.set_title(f"k={k+1}, a={d+1}", fontsize=9, pad=1.5)
         if c == 0:
             ax.set_ylabel(r"$\xi$", fontsize=9)
         if r == 1:
@@ -201,7 +201,7 @@ def create_subfigure_A(
         else:
             ax.set_xticklabels([])
 
-    add_subfigure_label(subfig, "A", y=1.01)
+    add_subfigure_label(subfig, "A", y=0.97)
 
 
 # ------------------------------ Subfigure B ------------------------------
@@ -263,7 +263,7 @@ def create_subfigure_B(
         ax_eps.axvline(rt, color="black", linewidth=0.9, linestyle="--", alpha=0.6)
     ax_eps.set_xlabel("Number of trials")
     ax_eps.set_ylabel(r"$\epsilon$")
-    ax_eps.set_title(f"{title_prefix}: ε", fontsize=10, pad=2)
+    ax_eps.set_title(f"ε", fontsize=10, pad=2)
     ax_eps.legend(frameon=False, ncol=1, handlelength=1.6, loc="upper right")
     ax_eps.tick_params(length=3)
 
@@ -298,10 +298,10 @@ def create_subfigure_B(
         ax_rho.axvline(rt, color="black", linewidth=0.9, linestyle="--", alpha=0.6)
     ax_rho.set_xlabel("Number of trials")
     ax_rho.set_ylabel(r"$\rho$")
-    ax_rho.set_title(f"{title_prefix}: ρ", fontsize=10, pad=2)
+    ax_rho.set_title(f"ρ", fontsize=10, pad=2)
     ax_rho.legend(frameon=False, ncol=1, handlelength=1.6, loc="upper right")
     ax_rho.tick_params(length=3)
-    add_subfigure_label(subfig, "B", y=1.01)
+    add_subfigure_label(subfig, "B", y=0.97)
 
     return (ax_eps, ax_rho)
 
@@ -403,9 +403,8 @@ def create_subfigure_C(
 def create_subfigure_D_hist(
     subfig: mpl.figure.SubFigure,
     n_trials_array: np.ndarray,
-    rho_attempts_S: np.ndarray,  # (A, S, L, N, K) per-neuron inferred diag ρ
-    rho_emp_per_neuron_attempts: np.ndarray
-    | None,  # (A, N, K) per-neuron empirical attempts
+    rho_attempts_S: np.ndarray,  # (A, S, L, N, K) per-neuron inferred diag rho
+    rho_emp_per_neuron_attempts: np.ndarray | None,  # (A, N, K) per-neuron empirical attempts
     neuron_ids_1based=(1, 2, 3, 4),
     k_select: int = 0,
     series_labels=("fit from 5", "fit from 10", "fit from 15"),
@@ -414,11 +413,26 @@ def create_subfigure_D_hist(
     """
     Single grouped-bar plot:
       x-axis groups = selected neurons (e.g., i = 1,2,3,4)
-      within each group: 3 theory bars (series) + 1 empirical bar
+      within each group: S theory bars + 1 empirical bar
 
-    Bars show mean ± std across attempts (NaN-aware). If theory values at n_target
-    are NaN for a given (series, neuron), that bar will be empty (height NaN).
+    Bars show:
+      - theory: mean ± std across attempts (NaN-aware)
+      - empirical: mean ± SEM across attempts (NaN-aware)
+
+    If theory values at n_target are NaN for a given (series, neuron), that bar
+    will be empty (height NaN).
     """
+    def nansem(x: np.ndarray) -> float:
+        """NaN-aware standard error of the mean."""
+        x = np.asarray(x, dtype=float)
+        x = x[~np.isnan(x)]
+        n = x.size
+        if n == 0:
+            return np.nan
+        if n == 1:
+            return 0.0
+        return np.std(x, ddof=1) / np.sqrt(n)
+
     # Resolve the trials index closest to n_target
     idx, actual_n = choose_index_for_trials(n_trials_array, n_target)
 
@@ -450,22 +464,22 @@ def create_subfigure_D_hist(
     colors_series = [plt.cm.tab10(i) for i in range(S)]
     emp_color = (0.25, 0.25, 0.25)
 
-    # Collect means/stds for each group (neuron) and each bar (series/empirical)
+    # Collect means/errors for each group (neuron) and each bar
     means = np.full((num_groups, num_bars_per_group), np.nan, dtype=float)
-    stds = np.full((num_groups, num_bars_per_group), np.nan, dtype=float)
+    errs = np.full((num_groups, num_bars_per_group), np.nan, dtype=float)
 
     for g, i0 in enumerate(valid_i0):
-        # Theory bars (S of them)
+        # Theory bars: mean ± std
         for s in range(S):
             vals = rho_attempts_S[:, s, idx, i0, k_select]  # (A,)
             means[g, s] = np.nanmean(vals)
-            stds[g, s] = np.nanstd(vals)
+            errs[g, s] = np.nanstd(vals)
 
-        # Empirical bar (last position)
+        # Empirical bar: mean ± SEM
         if have_emp:
             vemp = rho_emp_per_neuron_attempts[:, i0, k_select]  # (A,)
             means[g, S] = np.nanmean(vemp)
-            stds[g, S] = np.nanstd(vemp)
+            errs[g, S] = nansem(vemp)
 
     # ---- Plot: grouped bars on a single axis ----
     ax = subfig.add_subplot(1, 1, 1)
@@ -478,46 +492,36 @@ def create_subfigure_D_hist(
     ) * bar_width
 
     # Draw theory bars
-    handles, labels = [], []
     for s in range(S):
-        h = ax.bar(
+        ax.bar(
             x + offsets[s],
             means[:, s],
-            yerr=stds[:, s],
+            yerr=errs[:, s],
             width=bar_width * 0.95,
             capsize=3,
             color=colors_series[s],
             alpha=0.95,
-            label=series_labels[s]
-            if s == 0
-            else None,  # keep legend appearance identical
         )
-        if s == 0:
-            handles.append(h)
-            labels.append(series_labels[s])
 
     # Draw empirical bar
-    he = ax.bar(
+    ax.bar(
         x + offsets[S],
         means[:, S],
-        yerr=stds[:, S],
+        yerr=errs[:, S],
         width=bar_width * 0.95,
         capsize=3,
         color=emp_color,
         alpha=0.95,
-        label="empirical",
     )
-    handles.append(he)
-    labels.append("empirical")
 
     ax.set_xticks(x, xlabels)
     ax.set_ylabel(rf"$\rho_i^{{(k={k_select+1})}}$")
     ax.set_title(f"Per-neuron ρ at {actual_n} trials", fontsize=10)
     ax.tick_params(length=3)
     ax.margins(x=0.02)
-    ax.set_ylim(0, ax.get_ylim()[1])
+    ax.set_ylim(0, ax.get_ylim()[1]*1.3)
 
-    # Legend (distinct entries for all S theory series + empirical)
+    # Legend
     ax.legend(
         [plt.Rectangle((0, 0), 1, 1, color=colors_series[s]) for s in range(S)]
         + [plt.Rectangle((0, 0), 1, 1, color=emp_color)],
@@ -527,7 +531,6 @@ def create_subfigure_D_hist(
     )
 
     add_subfigure_label(subfig, "D", y=1.01, fontsize=14)
-
 
 # ------------------------------ Data loading & aggregation ------------------------------
 def load_all_inputs():
@@ -695,12 +698,14 @@ def main():
         n_trials_array,
         rho_attempts_S,  # (A, S, L, N, K) per-neuron inferred
         rho_emp_per_neuron_attempts,  # (A, N, K) per-neuron empirical
-        neuron_ids_1based=(1, 2, 3, 4),
+        neuron_ids_1based=(1, 5, 7, 12),
         k_select=0,  # choose component (0 or 1)
         series_labels=SERIES_LABELS,
         n_target=50,
     )
 
+    #plt.tight_layout()
+    plt.savefig("fig3.png")
     plt.show()
 
 
