@@ -978,9 +978,8 @@ def main():
         f"Estimating K on smallest available slice: trials={pre_trials}, "
         f"neurons={len(pre_ids)}, animals={D_pre}"
     )
-    #K = determine_dimensionality(data_fit_smallest, MODE, plot=True)
-    #print("K =", K)
-    K=2
+    K = determine_dimensionality(data_fit_smallest, MODE, plot=True)
+    print("K =", K)
 
     save_np("K", np.array(K, dtype=int))
     
